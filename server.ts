@@ -14,9 +14,16 @@ async function startServer() {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // Extract Google Spreadsheet ID from various URL patterns
-  function extractSpreadsheetId(input: string): { id: string | null; gid: string | null } {
-    const trimmed = input.trim();
+  // Comprehensive Google Resource URL Parser
+  interface ParsedGoogleResource {
+    type: 'published_sheet' | 'standard_sheet' | 'drive_file' | 'drive_folder' | 'raw_id' | 'unknown';
+    id: string | null;
+    pubId: string | null;
+    gid: string | null;
+  }
+
+  function parseGoogleResourceUrl(input: string): ParsedGoogleResource {
+    const trimmed = (input || '').trim();
 
     // Check GID in URL query or hash
     let gid: string | null = null;
@@ -25,104 +32,188 @@ async function startServer() {
       gid = gidMatch[1];
     }
 
-    // Pattern 1: https://docs.google.com/spreadsheets/d/{ID}/...
-    const dMatch = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-    if (dMatch) {
-      return { id: dMatch[1], gid };
+    // Check if it's a Google Drive folder
+    if (/\/folders\/([a-zA-Z0-9-_]+)/.test(trimmed)) {
+      return { type: 'drive_folder', id: null, pubId: null, gid: null };
     }
 
-    // Pattern 2: Raw ID (alphanumeric, underscores, hyphens, length > 25)
+    // Published Google Sheet (e.g. /spreadsheets/d/e/2PACX-.../pubhtml or /pub?output=...)
+    const pubMatch = trimmed.match(/\/spreadsheets\/d\/e\/([a-zA-Z0-9-_]+)/);
+    if (pubMatch) {
+      return { type: 'published_sheet', id: null, pubId: pubMatch[1], gid };
+    }
+
+    // Standard Google Sheet (e.g. /spreadsheets/d/{ID}/edit or view) - ensure ID is not 'e'
+    const sheetMatch = trimmed.match(/\/spreadsheets\/d\/(?!e\/)([a-zA-Z0-9-_]+)/);
+    if (sheetMatch) {
+      return { type: 'standard_sheet', id: sheetMatch[1], pubId: null, gid };
+    }
+
+    // Google Drive file (e.g. /file/d/{ID}/...)
+    const driveFileMatch = trimmed.match(/\/file\/d\/([a-zA-Z0-9-_]+)/);
+    if (driveFileMatch) {
+      return { type: 'drive_file', id: driveFileMatch[1], pubId: null, gid };
+    }
+
+    // Google Drive open?id={ID} or uc?id={ID}
+    const driveIdMatch = trimmed.match(/[?&]id=([a-zA-Z0-9-_]+)/);
+    if (driveIdMatch && (trimmed.includes('drive.google.com') || trimmed.includes('docs.google.com'))) {
+      return { type: 'drive_file', id: driveIdMatch[1], pubId: null, gid };
+    }
+
+    // Raw ID (alphanumeric, underscores, hyphens, length >= 25)
     if (/^[a-zA-Z0-9-_]{25,}$/.test(trimmed)) {
-      return { id: trimmed, gid };
+      return { type: 'raw_id', id: trimmed, pubId: null, gid };
     }
 
-    return { id: null, gid };
+    return { type: 'unknown', id: null, pubId: null, gid };
   }
 
-  // Extract Google Drive File ID from URL
-  function extractDriveFileId(input: string): string | null {
-    const trimmed = input.trim();
-
-    // Pattern 1: https://drive.google.com/file/d/{ID}/...
-    const fileMatch = trimmed.match(/\/file\/d\/([a-zA-Z0-9-_]+)/);
-    if (fileMatch) return fileMatch[1];
-
-    // Pattern 2: https://drive.google.com/open?id={ID} or uc?id={ID}
-    const idParamMatch = trimmed.match(/[?&]id=([a-zA-Z0-9-_]+)/);
-    if (idParamMatch) return idParamMatch[1];
-
-    // Pattern 3: Raw ID
-    if (/^[a-zA-Z0-9-_]{25,}$/.test(trimmed)) {
-      return trimmed;
-    }
-
-    return null;
-  }
-
-  // API Route: Fetch Google Spreadsheet (.xlsx export)
+  // API Route: Fetch Google Spreadsheet (.xlsx export or CSV fallback)
   app.post('/api/fetch-google-sheet', async (req, res) => {
     try {
       const { url, sheetGid } = req.body;
       if (!url || typeof url !== 'string') {
-        return res.status(400).json({ error: 'URL Google Spreadsheet wajib diisi.' });
+        return res.json({ success: false, error: 'URL Google Spreadsheet wajib diisi.' });
       }
 
-      const { id, gid } = extractSpreadsheetId(url);
-      if (!id) {
-        return res.status(400).json({
+      const parsed = parseGoogleResourceUrl(url);
+      const finalGid = sheetGid || parsed.gid;
+
+      if (parsed.type === 'drive_folder') {
+        return res.json({
+          success: false,
           error:
-            'Format tautan tidak dikenali. Pastikan Anda memasukkan link Google Spreadsheet lengkap (contoh: https://docs.google.com/spreadsheets/d/.../edit).',
+            'Tautan yang Anda masukkan adalah folder Google Drive, bukan spreadsheet. Silakan buka file spreadsheet di dalam folder, lalu salin tautan file/spreadsheet tersebut.',
         });
       }
 
-      const finalGid = sheetGid || gid;
-      const exportUrl = `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx${
-        finalGid ? `&gid=${finalGid}` : ''
-      }`;
+      const headers = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        Accept: '*/*',
+      };
 
-      console.log(`[Google Sheet Import] Mengunduh: ${exportUrl}`);
+      // Case 1: Published Google Sheet (2PACX-...)
+      if (parsed.type === 'published_sheet' && parsed.pubId) {
+        const pubId = parsed.pubId;
+        const candidateUrls = [
+          `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=xlsx${finalGid ? `&gid=${finalGid}` : ''}`,
+          `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv${finalGid ? `&gid=${finalGid}` : ''}`,
+        ];
 
-      const response = await fetch(exportUrl, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        },
-        redirect: 'follow',
-      });
+        for (const candidateUrl of candidateUrls) {
+          try {
+            console.log(`[Google Sheet Import] Mengunduh Sheet Publikasi: ${candidateUrl}`);
+            const response = await fetch(candidateUrl, { headers, redirect: 'follow' });
+            if (response.ok) {
+              const contentType = response.headers.get('content-type') || '';
+              const arrayBuffer = await response.arrayBuffer();
 
-      if (!response.ok) {
-        return res.status(response.status).json({
-          error: `Google Spreadsheet mengembalikan status HTTP ${response.status}. Pastikan dokumen tidak dihapus.`,
-        });
-      }
-
-      const contentType = response.headers.get('content-type') || '';
-      const arrayBuffer = await response.arrayBuffer();
-
-      // Check if response returned an HTML login page instead of xlsx binary
-      if (contentType.includes('text/html')) {
-        const textSample = Buffer.from(arrayBuffer).toString('utf-8', 0, 1000);
-        if (textSample.includes('accounts.google.com') || textSample.includes('Sign in') || textSample.includes('ServiceLogin')) {
-          return res.status(403).json({
-            error:
-              'Akses Ditolak (Privat): Google Spreadsheet ini belum diatur ke publik. Silakan buka file di Google Spreadsheet -> klik tombol "Bagikan" (Share) -> ubah Akses umum menjadi "Siapa saja yang memiliki tautan" (Anyone with the link can view) -> Salin tautan dan coba lagi.',
-          });
+              if (!contentType.includes('text/html') || arrayBuffer.byteLength > 100) {
+                const textSample = Buffer.from(arrayBuffer).toString('utf-8', 0, 500);
+                if (!textSample.includes('<!DOCTYPE html>') && !textSample.includes('accounts.google.com')) {
+                  const base64Data = Buffer.from(arrayBuffer).toString('base64');
+                  return res.json({
+                    success: true,
+                    spreadsheetId: pubId,
+                    gid: finalGid,
+                    fileName: `Google_Spreadsheet_Pub_${pubId.substring(0, 10)}.xlsx`,
+                    fileBase64: base64Data,
+                    sizeBytes: arrayBuffer.byteLength,
+                  });
+                }
+              }
+            }
+          } catch (fetchErr) {
+            console.warn('[Published Sheet Fetch Error]:', fetchErr);
+          }
         }
       }
 
-      const base64Data = Buffer.from(arrayBuffer).toString('base64');
+      // Case 2: Standard Sheet or Raw ID or Drive File that might be a sheet
+      const sheetId = parsed.id;
+      if (!sheetId) {
+        return res.json({
+          success: false,
+          error:
+            'Format tautan tidak dikenali. Pastikan Anda memasukkan tautan Google Spreadsheet lengkap (contoh: https://docs.google.com/spreadsheets/d/1Xyz.../edit).',
+        });
+      }
+
+      // Candidates to try: XLSX export first, then CSV export via gviz/tq
+      const candidates = [
+        {
+          url: `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=xlsx${
+            finalGid ? `&gid=${finalGid}` : ''
+          }`,
+          isCsv: false,
+        },
+        {
+          url: `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv${
+            finalGid ? `&gid=${finalGid}` : ''
+          }`,
+          isCsv: true,
+        },
+      ];
+
+      for (const candidate of candidates) {
+        try {
+          console.log(`[Google Sheet Import] Mencoba: ${candidate.url}`);
+          const response = await fetch(candidate.url, { headers, redirect: 'follow' });
+
+          if (response.ok) {
+            const contentType = response.headers.get('content-type') || '';
+            const arrayBuffer = await response.arrayBuffer();
+            const textSample = Buffer.from(arrayBuffer).toString('utf-8', 0, 1000);
+
+            // Check if returned Google login page
+            if (
+              textSample.includes('accounts.google.com') ||
+              textSample.includes('ServiceLogin') ||
+              textSample.includes('Sign in - Google Accounts')
+            ) {
+              return res.json({
+                success: false,
+                isPrivate: true,
+                error:
+                  'Akses Ditolak (Privat): Google Spreadsheet ini belum diatur ke publik. Silakan buka dokumen di Google Spreadsheet -> klik tombol "Bagikan" (Share) -> ubah Akses umum menjadi "Siapa saja yang memiliki tautan" (Anyone with the link) -> Salin tautan dan coba lagi. Atau unduh file .xlsx ke komputer lalu gunakan tab "Upload File Lokal".',
+              });
+            }
+
+            // Check if returned 404 or robot page
+            if (textSample.includes('404. That’s an error') || textSample.includes('The requested URL was not found')) {
+              continue; // Try next candidate
+            }
+
+            // Valid binary or CSV data
+            if (!contentType.includes('text/html') || candidate.isCsv) {
+              const base64Data = Buffer.from(arrayBuffer).toString('base64');
+              return res.json({
+                success: true,
+                spreadsheetId: sheetId,
+                gid: finalGid,
+                fileName: `Google_Spreadsheet_${sheetId.substring(0, 10)}.${candidate.isCsv ? 'csv' : 'xlsx'}`,
+                fileBase64: base64Data,
+                sizeBytes: arrayBuffer.byteLength,
+              });
+            }
+          }
+        } catch (candidateErr) {
+          console.warn('[Candidate fetch error]:', candidateErr);
+        }
+      }
+
       return res.json({
-        success: true,
-        spreadsheetId: id,
-        gid: finalGid,
-        fileName: `Google_Spreadsheet_${id}.xlsx`,
-        fileBase64: base64Data,
-        sizeBytes: arrayBuffer.byteLength,
+        success: false,
+        error:
+          'Tidak dapat mengunduh spreadsheet dari tautan tersebut. Pastikan akses dokumen telah diatur ke "Siapa saja yang memiliki tautan" (Anyone with the link). Anda juga bisa langsung mengunduh file (.xlsx / .csv) dari Google Spreadsheet ke komputer lalu gunakan tab "Upload File Lokal".',
       });
     } catch (err: any) {
       console.error('[Google Sheet Import Error]:', err);
-      return res.status(500).json({
-        error: `Gagal mengunduh Google Spreadsheet: ${err.message || 'Terjadi kesalahan jaringan'}`,
+      return res.json({
+        success: false,
+        error: `Gagal memproses spreadsheet: ${err.message || 'Terjadi kesalahan jaringan'}`,
       });
     }
   });
@@ -132,83 +223,137 @@ async function startServer() {
     try {
       const { url } = req.body;
       if (!url || typeof url !== 'string') {
-        return res.status(400).json({ error: 'URL Google Drive wajib diisi.' });
+        return res.json({ success: false, error: 'URL Google Drive wajib diisi.' });
       }
 
-      // First check if user pasted a Google Spreadsheet link into the Drive box
-      const sheetCheck = extractSpreadsheetId(url);
-      if (sheetCheck.id) {
-        const exportUrl = `https://docs.google.com/spreadsheets/d/${sheetCheck.id}/export?format=xlsx${
-          sheetCheck.gid ? `&gid=${sheetCheck.gid}` : ''
-        }`;
-        const response = await fetch(exportUrl, { redirect: 'follow' });
-        if (response.ok) {
-          const contentType = response.headers.get('content-type') || '';
-          const arrayBuffer = await response.arrayBuffer();
-          if (!contentType.includes('text/html')) {
+      const parsed = parseGoogleResourceUrl(url);
+
+      if (parsed.type === 'drive_folder') {
+        return res.json({
+          success: false,
+          error:
+            'Tautan yang Anda masukkan adalah folder Google Drive, bukan file. Silakan buka file spreadsheet di dalam folder, lalu salin tautan file tersebut.',
+        });
+      }
+
+      const fileId = parsed.id;
+      if (!fileId) {
+        return res.json({
+          success: false,
+          error:
+            'Format tautan Google Drive tidak dikenali. Pastikan tautan berbentuk https://drive.google.com/file/d/... atau berikan ID file.',
+        });
+      }
+
+      const headers = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        Accept: '*/*',
+      };
+
+      // 1. First, try exporting as Google Spreadsheet (in case it's a native Google Sheet on Drive)
+      try {
+        const sheetExportUrl = `https://docs.google.com/spreadsheets/d/${fileId}/export?format=xlsx`;
+        const sheetRes = await fetch(sheetExportUrl, { headers, redirect: 'follow' });
+        if (sheetRes.ok) {
+          const contentType = sheetRes.headers.get('content-type') || '';
+          const arrayBuffer = await sheetRes.arrayBuffer();
+          const textSample = Buffer.from(arrayBuffer).toString('utf-8', 0, 500);
+
+          if (
+            !contentType.includes('text/html') &&
+            !textSample.includes('accounts.google.com') &&
+            !textSample.includes('<!DOCTYPE html>')
+          ) {
             const base64Data = Buffer.from(arrayBuffer).toString('base64');
             return res.json({
               success: true,
-              fileId: sheetCheck.id,
-              fileName: `Google_Drive_Sheet_${sheetCheck.id}.xlsx`,
+              fileId,
+              fileName: `Google_Drive_Sheet_${fileId.substring(0, 10)}.xlsx`,
               fileBase64: base64Data,
               sizeBytes: arrayBuffer.byteLength,
             });
           }
         }
+      } catch (e) {
+        // Continue to drive download URLs
       }
 
-      const fileId = extractDriveFileId(url);
-      if (!fileId) {
-        return res.status(400).json({
-          error:
-            'Format tautan Google Drive tidak dikenali. Pastikan link berbentuk https://drive.google.com/file/d/... atau berikan ID file.',
-        });
-      }
+      // 2. Try direct download endpoints for Google Drive uploaded files (.xlsx, .xls, .csv)
+      const downloadUrls = [
+        `https://drive.usercontent.google.com/download?id=${fileId}&export=download`,
+        `https://drive.google.com/uc?export=download&id=${fileId}`,
+      ];
 
-      // Direct download URL for shared Google Drive files
-      const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
-      console.log(`[Google Drive Import] Mengunduh file ID: ${fileId}`);
+      for (const downloadUrl of downloadUrls) {
+        try {
+          console.log(`[Google Drive Import] Mengunduh: ${downloadUrl}`);
+          const response = await fetch(downloadUrl, { headers, redirect: 'follow' });
 
-      const response = await fetch(downloadUrl, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        },
-        redirect: 'follow',
-      });
+          if (response.ok) {
+            const contentType = response.headers.get('content-type') || '';
+            const arrayBuffer = await response.arrayBuffer();
+            const textSample = Buffer.from(arrayBuffer).toString('utf-8', 0, 1500);
 
-      if (!response.ok) {
-        return res.status(response.status).json({
-          error: `Google Drive mengembalikan kode error HTTP ${response.status}.`,
-        });
-      }
+            if (
+              textSample.includes('accounts.google.com') ||
+              textSample.includes('ServiceLogin') ||
+              textSample.includes('Sign in - Google Accounts')
+            ) {
+              return res.json({
+                success: false,
+                isPrivate: true,
+                error:
+                  'Akses Ditolak: File Google Drive ini belum dibagikan secara publik. Silakan klik kanan file di Google Drive -> "Bagikan" -> ubah akses menjadi "Siapa saja yang memiliki tautan" (Anyone with the link can view). Atau unduh file ke komputer lalu unggah di tab "Upload File Lokal".',
+              });
+            }
 
-      const contentType = response.headers.get('content-type') || '';
-      const arrayBuffer = await response.arrayBuffer();
+            // Check if Drive shows large file virus scan confirm page
+            const confirmMatch = textSample.match(/confirm=([0-9a-zA-Z_]+)/);
+            if (confirmMatch) {
+              const confirmUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirmMatch[1]}`;
+              const confirmRes = await fetch(confirmUrl, { headers, redirect: 'follow' });
+              if (confirmRes.ok) {
+                const confirmedBuffer = await confirmRes.arrayBuffer();
+                const base64Data = Buffer.from(confirmedBuffer).toString('base64');
+                return res.json({
+                  success: true,
+                  fileId,
+                  fileName: `Google_Drive_${fileId.substring(0, 10)}.xlsx`,
+                  fileBase64: base64Data,
+                  sizeBytes: confirmedBuffer.byteLength,
+                });
+              }
+            }
 
-      if (contentType.includes('text/html')) {
-        const textSample = Buffer.from(arrayBuffer).toString('utf-8', 0, 1000);
-        if (textSample.includes('ServiceLogin') || textSample.includes('accounts.google.com')) {
-          return res.status(403).json({
-            error:
-              'Akses Ditolak: File Google Drive ini belum dibagikan. Silakan klik kanan file di Google Drive -> "Bagikan" -> ubah akses menjadi "Siapa saja yang memiliki tautan" (Anyone with the link).',
-          });
+            if (!contentType.includes('text/html') || arrayBuffer.byteLength > 1000) {
+              if (!textSample.includes('<!DOCTYPE html>') && !textSample.includes('The requested URL was not found')) {
+                const base64Data = Buffer.from(arrayBuffer).toString('base64');
+                return res.json({
+                  success: true,
+                  fileId,
+                  fileName: `Google_Drive_${fileId.substring(0, 10)}.xlsx`,
+                  fileBase64: base64Data,
+                  sizeBytes: arrayBuffer.byteLength,
+                });
+              }
+            }
+          }
+        } catch (driveErr) {
+          console.warn('[Drive download error]:', driveErr);
         }
       }
 
-      const base64Data = Buffer.from(arrayBuffer).toString('base64');
       return res.json({
-        success: true,
-        fileId,
-        fileName: `Google_Drive_${fileId}.xlsx`,
-        fileBase64: base64Data,
-        sizeBytes: arrayBuffer.byteLength,
+        success: false,
+        error:
+          'Gagal mengunduh file dari Google Drive. Pastikan file berformat .xlsx, .xls, atau .csv dan izin file telah diatur ke "Siapa saja yang memiliki tautan". Alternatif terbaik: Unduh file dari Google Drive ke komputer Anda, lalu seret ke tab "Upload File Lokal".',
       });
     } catch (err: any) {
       console.error('[Google Drive Import Error]:', err);
-      return res.status(500).json({
-        error: `Gagal mengunduh file dari Google Drive: ${err.message || 'Kesalahan koneksi'}`,
+      return res.json({
+        success: false,
+        error: `Gagal memproses file dari Google Drive: ${err.message || 'Kesalahan koneksi'}`,
       });
     }
   });

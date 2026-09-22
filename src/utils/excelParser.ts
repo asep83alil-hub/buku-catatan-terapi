@@ -329,64 +329,268 @@ export async function parseSpreadsheetFile(file: File): Promise<{
   return parseSpreadsheetArrayBuffer(arrayBuffer);
 }
 
-// Helper to call backend proxy to fetch Google Spreadsheet
+// Helper to convert Base64 string to ArrayBuffer safely
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binaryString = window.atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+// Comprehensive Google Resource URL Parser
+export interface ParsedGoogleResource {
+  type: 'published_sheet' | 'standard_sheet' | 'drive_file' | 'drive_folder' | 'raw_id' | 'unknown';
+  id: string | null;
+  pubId: string | null;
+  gid: string | null;
+}
+
+export function parseGoogleResourceUrl(input: string): ParsedGoogleResource {
+  const trimmed = (input || '').trim();
+
+  let gid: string | null = null;
+  const gidMatch = trimmed.match(/[?#&]gid=([0-9]+)/);
+  if (gidMatch) {
+    gid = gidMatch[1];
+  }
+
+  if (/\/folders\/([a-zA-Z0-9-_]+)/.test(trimmed)) {
+    return { type: 'drive_folder', id: null, pubId: null, gid: null };
+  }
+
+  const pubMatch = trimmed.match(/\/spreadsheets\/d\/e\/([a-zA-Z0-9-_]+)/);
+  if (pubMatch) {
+    return { type: 'published_sheet', id: null, pubId: pubMatch[1], gid };
+  }
+
+  const sheetMatch = trimmed.match(/\/spreadsheets\/d\/(?!e\/)([a-zA-Z0-9-_]+)/);
+  if (sheetMatch) {
+    return { type: 'standard_sheet', id: sheetMatch[1], pubId: null, gid };
+  }
+
+  const driveFileMatch = trimmed.match(/\/file\/d\/([a-zA-Z0-9-_]+)/);
+  if (driveFileMatch) {
+    return { type: 'drive_file', id: driveFileMatch[1], pubId: null, gid };
+  }
+
+  const driveIdMatch = trimmed.match(/[?&]id=([a-zA-Z0-9-_]+)/);
+  if (driveIdMatch && (trimmed.includes('drive.google.com') || trimmed.includes('docs.google.com'))) {
+    return { type: 'drive_file', id: driveIdMatch[1], pubId: null, gid };
+  }
+
+  if (/^[a-zA-Z0-9-_]{25,}$/.test(trimmed)) {
+    return { type: 'raw_id', id: trimmed, pubId: null, gid };
+  }
+
+  return { type: 'unknown', id: null, pubId: null, gid };
+}
+
+// Helper to fetch Google Spreadsheet (Direct Browser CORS fetch + Backend proxy fallback)
 export async function fetchGoogleSpreadsheetFromUrl(url: string, sheetGid?: string): Promise<{
   arrayBuffer: ArrayBuffer;
   fileName: string;
   spreadsheetId: string;
 }> {
-  const response = await fetch('/api/fetch-google-sheet', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, sheetGid }),
-  });
+  const parsed = parseGoogleResourceUrl(url);
+  const finalGid = sheetGid || parsed.gid;
 
-  const data = await response.json();
-  if (!response.ok || !data.success) {
-    throw new Error(data.error || `Gagal mengunduh spreadsheet (Status HTTP: ${response.status})`);
+  if (parsed.type === 'drive_folder') {
+    throw new Error(
+      'Tautan yang Anda masukkan adalah folder Google Drive, bukan spreadsheet. Silakan buka file spreadsheet di dalam folder, lalu salin tautan file tersebut.'
+    );
   }
 
-  // Convert base64 to ArrayBuffer
-  const binaryString = window.atob(data.fileBase64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+  // 1. ATTEMPT DIRECT BROWSER FETCH (Google's CSV / gviz endpoints support CORS for public sheets)
+  if (parsed.type === 'standard_sheet' || parsed.type === 'raw_id') {
+    const sheetId = parsed.id;
+    if (sheetId) {
+      try {
+        const directCsvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv${
+          finalGid ? `&gid=${finalGid}` : ''
+        }`;
+        const directRes = await fetch(directCsvUrl, { mode: 'cors' });
+        if (directRes.ok) {
+          const contentType = directRes.headers.get('content-type') || '';
+          const text = await directRes.text();
+          // Verify it's not a Google login page
+          if (
+            !text.includes('accounts.google.com') &&
+            !text.includes('ServiceLogin') &&
+            !text.includes('<!DOCTYPE html>') &&
+            text.length > 20
+          ) {
+            const encoder = new TextEncoder();
+            return {
+              arrayBuffer: encoder.encode(text).buffer,
+              fileName: `Google_Spreadsheet_${sheetId.substring(0, 10)}.csv`,
+              spreadsheetId: sheetId,
+            };
+          }
+        }
+      } catch {
+        // Direct fetch failed or blocked by CORS/privacy, proceed to backend proxy
+      }
+    }
+  } else if (parsed.type === 'published_sheet' && parsed.pubId) {
+    try {
+      const directPubCsv = `https://docs.google.com/spreadsheets/d/e/${parsed.pubId}/pub?output=csv${
+        finalGid ? `&gid=${finalGid}` : ''
+      }`;
+      const directRes = await fetch(directPubCsv, { mode: 'cors' });
+      if (directRes.ok) {
+        const text = await directRes.text();
+        if (!text.includes('accounts.google.com') && !text.includes('<!DOCTYPE html>') && text.length > 20) {
+          const encoder = new TextEncoder();
+          return {
+            arrayBuffer: encoder.encode(text).buffer,
+            fileName: `Google_Spreadsheet_Pub_${parsed.pubId.substring(0, 10)}.csv`,
+            spreadsheetId: parsed.pubId,
+          };
+        }
+      }
+    } catch {
+      // Direct fetch failed, proceed to backend proxy
+    }
   }
+
+  // 2. ATTEMPT VIA BACKEND PROXY (safely handles XLSX export & handles non-JSON responses)
+  let response: Response;
+  try {
+    response = await fetch('/api/fetch-google-sheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, sheetGid: finalGid }),
+    });
+  } catch (netErr: any) {
+    throw new Error(
+      `Tidak dapat terhubung ke server aplikasi (${netErr?.message || 'Koneksi terputus'}). Silakan gunakan tab "Upload File Lokal" untuk mengunggah file spreadsheet langsung dari komputer.`
+    );
+  }
+
+  // Safely parse response content
+  const contentType = response.headers.get('content-type') || '';
+  let data: any = null;
+
+  if (contentType.includes('application/json')) {
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!data) {
+    const rawText = await response.text();
+    if (
+      rawText.toLowerCase().includes('the page cannot be found') ||
+      rawText.toLowerCase().includes('page not found') ||
+      rawText.includes('The page c')
+    ) {
+      throw new Error(
+        'Server Google atau jaringan tidak dapat mengakses tautan spreadsheet ini. Pastikan izin akses telah diubah ke "Siapa saja yang memiliki tautan" (Anyone with the link). Sebagai alternatif tercepat dan paling andal, unduh file spreadsheet (.xlsx atau .csv) ke komputer Anda lalu unggah di tab "Upload File Lokal".'
+      );
+    }
+    throw new Error(
+      `Gagal membaca respon server (Status: ${response.status}). Disarankan mengunduh file ke komputer dan menggunakan tab "Upload File Lokal".`
+    );
+  }
+
+  if (!data.success) {
+    throw new Error(
+      data.error ||
+        'Gagal mengunduh Google Spreadsheet. Pastikan dokumen dibuka untuk publik atau gunakan tab "Upload File Lokal".'
+    );
+  }
+
+  const arrayBuffer = base64ToArrayBuffer(data.fileBase64);
 
   return {
-    arrayBuffer: bytes.buffer,
+    arrayBuffer,
     fileName: data.fileName || 'Google_Spreadsheet.xlsx',
-    spreadsheetId: data.spreadsheetId,
+    spreadsheetId: data.spreadsheetId || 'spreadsheet',
   };
 }
 
-// Helper to call backend proxy to fetch Google Drive file
+// Helper to fetch file from Google Drive (Safely handles JSON & proxy responses)
 export async function fetchGoogleDriveFromUrl(url: string): Promise<{
   arrayBuffer: ArrayBuffer;
   fileName: string;
   fileId: string;
 }> {
-  const response = await fetch('/api/fetch-google-drive', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
-  });
+  const parsed = parseGoogleResourceUrl(url);
 
-  const data = await response.json();
-  if (!response.ok || !data.success) {
-    throw new Error(data.error || `Gagal mengunduh file Google Drive (Status HTTP: ${response.status})`);
+  if (parsed.type === 'drive_folder') {
+    throw new Error(
+      'Tautan yang Anda masukkan adalah folder Google Drive, bukan file spreadsheet. Silakan buka file di dalam folder tersebut, lalu salin tautan filenya.'
+    );
   }
 
-  const binaryString = window.atob(data.fileBase64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+  // If user pasted a Google Spreadsheet URL into the Drive input, forward to sheet fetcher
+  if (parsed.type === 'standard_sheet' || parsed.type === 'published_sheet') {
+    const sheetResult = await fetchGoogleSpreadsheetFromUrl(url);
+    return {
+      arrayBuffer: sheetResult.arrayBuffer,
+      fileName: sheetResult.fileName,
+      fileId: sheetResult.spreadsheetId,
+    };
   }
+
+  let response: Response;
+  try {
+    response = await fetch('/api/fetch-google-drive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+  } catch (netErr: any) {
+    throw new Error(
+      `Tidak dapat terhubung ke server aplikasi (${netErr?.message || 'Koneksi terputus'}). Silakan gunakan tab "Upload File Lokal" untuk mengunggah file langsung dari komputer.`
+    );
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  let data: any = null;
+
+  if (contentType.includes('application/json')) {
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!data) {
+    const rawText = await response.text();
+    if (
+      rawText.toLowerCase().includes('the page cannot be found') ||
+      rawText.toLowerCase().includes('page not found') ||
+      rawText.includes('The page c')
+    ) {
+      throw new Error(
+        'Server Google Drive menolak unduhan otomatis atau file tidak ditemukan. Silakan klik kanan file di Google Drive -> "Download / Unduh" (.xlsx atau .csv) ke komputer Anda, lalu unggah melalui tab "Upload File Lokal".'
+      );
+    }
+    throw new Error(
+      `Gagal membaca respon server Google Drive (Status: ${response.status}). Silakan gunakan tab "Upload File Lokal".`
+    );
+  }
+
+  if (!data.success) {
+    throw new Error(
+      data.error ||
+        'Gagal mengunduh file dari Google Drive. Pastikan file dibagikan ke publik atau gunakan tab "Upload File Lokal".'
+    );
+  }
+
+  const arrayBuffer = base64ToArrayBuffer(data.fileBase64);
 
   return {
-    arrayBuffer: bytes.buffer,
+    arrayBuffer,
     fileName: data.fileName || 'Google_Drive_File.xlsx',
-    fileId: data.fileId,
+    fileId: data.fileId || 'drive_file',
   };
 }
 

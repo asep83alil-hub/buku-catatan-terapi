@@ -722,11 +722,41 @@ export const UploadModal: React.FC<UploadModalProps> = ({
 
               {/* Parse Error */}
               {parseError && (
-                <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-start gap-2.5">
+                <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 flex items-start gap-3">
                   <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold block">Gagal Membaca Spreadsheet</span>
-                    <p className="leading-relaxed mt-0.5">{parseError}</p>
+                  <div className="flex-1 space-y-2">
+                    <div>
+                      <span className="font-bold block text-rose-950 text-sm">Gagal Mengimpor Spreadsheet</span>
+                      <p className="leading-relaxed mt-1 text-rose-800">{parseError}</p>
+                    </div>
+
+                    {(activeSourceTab === 'sheets' || activeSourceTab === 'drive') && (
+                      <div className="pt-2 flex flex-wrap items-center gap-2 border-t border-rose-200/70">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveSourceTab('file');
+                            setParseError(null);
+                          }}
+                          className="px-3 py-1.5 bg-teal-700 hover:bg-teal-800 text-white rounded-lg font-medium text-[11px] inline-flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>Gunakan Tab "Upload File Lokal" (Paling Cepat & Pasti Berhasil)</span>
+                        </button>
+
+                        {(googleSheetUrl || googleDriveUrl) && (
+                          <a
+                            href={activeSourceTab === 'sheets' ? googleSheetUrl : googleDriveUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-3 py-1.5 bg-white border border-rose-300 hover:bg-rose-100/50 text-rose-900 rounded-lg font-medium text-[11px] inline-flex items-center gap-1.5 transition-colors"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5 text-rose-600" />
+                            <span>Buka Link di Tab Baru</span>
+                          </a>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
