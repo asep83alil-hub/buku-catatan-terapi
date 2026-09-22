@@ -1,0 +1,8 @@
+{
+  "name": "Remix Buku Catatan Terapi Siswa",
+  "description": "Aplikasi Buku Catatan Terapi Siswa digital untuk Pusat Terapi Tumbuh Kembang Anak Pelangi Lazuardi dengan manajemen rekam jejak, import langsung Google Drive \u0026 Spreadsheet, dan cetak PDF notebook.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

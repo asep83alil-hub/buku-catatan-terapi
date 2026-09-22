@@ -1,0 +1,80 @@
+<svg viewBox="0 0 520 200" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Logo Pelangi Lazuardi">
+  <!-- Perisai Lambang (Shield) -->
+  <g id="shield-emblem">
+    <!-- Latar Putih Perisai -->
+    <path
+      d="M85 10 C105 10 148 5 156 16 C159 28 159 105 159 116 C159 152 124 178 85 194 C46 178 11 152 11 116 C11 105 11 28 14 16 C22 5 65 10 85 10 Z"
+      fill="#FFFFFF"
+    />
+    <!-- Garis Luar Perisai Biru -->
+    <path
+      d="M85 10 C105 10 148 5 156 16 C159 28 159 105 159 116 C159 152 124 178 85 194 C46 178 11 152 11 116 C11 105 11 28 14 16 C22 5 65 10 85 10 Z"
+      stroke="#214F9B"
+      stroke-width="9"
+      stroke-linejoin="round"
+      fill="none"
+    />
+
+    <!-- Lengkungan Pelangi 1: Merah (Luar) -->
+    <path
+      d="M32 94 A 53 53 0 0 1 138 94"
+      stroke="#E32626"
+      stroke-width="11"
+      stroke-linecap="butt"
+      fill="none"
+    />
+    <!-- Lengkungan Pelangi 2: Oranye (Tengah) -->
+    <path
+      d="M43 94 A 42 42 0 0 1 127 94"
+      stroke="#F58220"
+      stroke-width="10.5"
+      stroke-linecap="butt"
+      fill="none"
+    />
+    <!-- Lengkungan Pelangi 3: Hijau (Dalam) -->
+    <path
+      d="M53.5 94 A 31.5 31.5 0 0 1 116.5 94"
+      stroke="#0FA958"
+      stroke-width="10"
+      stroke-linecap="butt"
+      fill="none"
+    />
+
+    <!-- Kepala Figur Ananda (Lingkaran Biru) -->
+    <circle cx="85" cy="104" r="14.5" fill="#214F9B" />
+
+    <!-- Sayap / Buku Terbuka (Figur Tubuh Biru) -->
+    <path
+      d="M85 178 C83 145 52 126 36 122 C36 142 46 168 85 178 Z"
+      fill="#214F9B"
+    />
+    <path
+      d="M85 178 C87 145 118 126 134 122 C134 142 124 168 85 178 Z"
+      fill="#214F9B"
+    />
+  </g>
+
+  <!-- Tipografi "Pelangi Lazuardi" -->
+  <g id="brand-text" fill="#28292E">
+    <text
+      x="185"
+      y="92"
+      font-family="'Georgia', 'Times New Roman', 'Merriweather', serif"
+      font-size="78"
+      font-weight="900"
+      letter-spacing="-1"
+    >
+      Pelangi
+    </text>
+    <text
+      x="185"
+      y="172"
+      font-family="'Georgia', 'Times New Roman', 'Merriweather', serif"
+      font-size="78"
+      font-weight="900"
+      letter-spacing="-1"
+    >
+      Lazuardi
+    </text>
+  </g>
+</svg>
